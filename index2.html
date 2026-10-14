@@ -233,7 +233,7 @@
         <h2>Interaction</h2>
         <label class="field"><span>Interaction (conversation) ID</span>
           <input type="text" id="convId" placeholder="e.g. 3f2a9c1e-…" autocomplete="off" spellcheck="false" /></label>
-        <label class="field"><span>Search back</span>
+        <label class="field"><span>Search back (async job fallback)</span>
           <select id="lookback">
             <option value="31">Last 31 days</option>
             <option value="93">Last 3 months</option>
@@ -242,7 +242,7 @@
           </select></label>
         <button class="btn primary" id="goBtn" type="button">Retrieve</button>
         <ul class="log" id="log"></ul>
-        <p class="note">Uses the asynchronous analytics conversation details job (one job per 31-day window, newest first, stopping as soon as the interaction is found), then looks up each outcome and milestone ID in Architect to show its name.</p>
+        <p class="note">Recent interactions are fetched directly from analytics (available within minutes). If not found there, the asynchronous conversation details job is used, one job per 31-day window, newest first; that job lags real time by roughly 12 to 48 hours. Each outcome and milestone ID is then looked up in Architect to show its name.</p>
         <h2>Download</h2>
         <div class="dlbtns">
           <button class="btn" id="csvBtn" type="button" disabled>CSV</button>
@@ -521,6 +521,30 @@ async function runJob(conversationId, startMs, endMs, seq) {
   return { interval, conv: convs.find((c) => c.conversationId === conversationId) || null };
 }
 
+/* ---------- near-real-time lookups (used before the async job) ---------- */
+// The async job reads from the analytics data lake, which lags real time by roughly 12-48 hours.
+// These two synchronous endpoints return recent interactions within minutes.
+async function fetchById(id) {
+  try { return await api(`/api/v2/analytics/conversations/${encodeURIComponent(id)}/details`); }
+  catch (e) { if (e.status === 404) return null; throw e; }
+}
+async function fetchByQuery(id) {
+  const end = Date.now(), start = end - 7 * DAY;
+  const interval = `${new Date(start).toISOString()}/${new Date(end).toISOString()}`;
+  const r = await api('/api/v2/analytics/conversations/details/query', {
+    method: 'POST',
+    body: JSON.stringify({
+      interval, order: 'asc', orderBy: 'conversationStart', paging: { pageSize: 25, pageNumber: 1 },
+      conversationFilters: [{ type: 'and', predicates: [{ type: 'dimension', dimension: 'conversationId', operator: 'matches', value: id }] }],
+    }),
+  });
+  return { interval, conv: ((r && r.conversations) || []).find((c) => c.conversationId === id) || null };
+}
+async function jobAvailability() {
+  try { const a = await api('/api/v2/analytics/conversations/details/jobs/availability'); return a && a.dataAvailabilityDate; }
+  catch { return null; }
+}
+
 /* ---------- event extraction ---------- */
 function firstKey(obj, test) { const k = Object.keys(obj || {}).find(test); return k ? obj[k] : undefined; }
 function pickTime(o) {
@@ -601,22 +625,46 @@ async function retrieve() {
   renderAll();
 
   try {
-    const lookbackMs = parseInt($('lookback').value, 10) * DAY;
-    const now = Date.now(), floor = now - lookbackMs;
-    let end = now, found = null, lastInterval = '';
-    while (end > floor && !found) {
-      const start = Math.max(end - 31 * DAY, floor);
-      const label = `${new Date(start).toISOString().slice(0, 10)} → ${new Date(end).toISOString().slice(0, 10)}`;
-      const li = logLine(`<span class="spinner"></span>Analytics job for ${label}…`);
-      const r = await runJob(id, start, end, seq);
-      if (seq !== S.runSeq) return;
-      lastInterval = r.interval;
-      if (r.conv) { found = r.conv; li.className = 'ok'; li.textContent = `Found in ${label}`; }
-      else li.textContent = `Not in ${label}`;
-      end = start;
-    }
+    let found = null, lastInterval = '', source = '';
+
+    // 1. direct lookup by conversation ID (near real time, any age still held by analytics)
+    let li = logLine('<span class="spinner"></span>Looking up the interaction directly…');
+    found = await fetchById(id);
+    if (seq !== S.runSeq) return;
+    if (found) { source = 'Analytics conversation details (by ID)'; li.className = 'ok'; li.textContent = 'Found via direct lookup'; }
+    else li.textContent = 'Not available via direct lookup';
+
+    // 2. synchronous details query, last 7 days
     if (!found) {
-      showMsg(`Interaction ${id} was not found in the last ${Math.round(lookbackMs / DAY)} days. Check the ID, or widen "Search back".`, 'warn');
+      li = logLine('<span class="spinner"></span>Trying the synchronous details query (last 7 days)…');
+      const q = await fetchByQuery(id);
+      if (seq !== S.runSeq) return;
+      lastInterval = q.interval;
+      if (q.conv) { found = q.conv; source = 'Analytics details query (synchronous)'; li.className = 'ok'; li.textContent = 'Found via synchronous query'; }
+      else li.textContent = 'Not found via synchronous query';
+    }
+
+    // 3. asynchronous job, 31-day windows, newest first
+    if (!found) {
+      const lookbackMs = parseInt($('lookback').value, 10) * DAY;
+      const now = Date.now(), floor = now - lookbackMs;
+      let end = now;
+      while (end > floor && !found) {
+        const start = Math.max(end - 31 * DAY, floor);
+        const label = `${new Date(start).toISOString().slice(0, 10)} → ${new Date(end).toISOString().slice(0, 10)}`;
+        li = logLine(`<span class="spinner"></span>Analytics job for ${label}…`);
+        const r = await runJob(id, start, end, seq);
+        if (seq !== S.runSeq) return;
+        lastInterval = r.interval;
+        if (r.conv) { found = r.conv; source = 'Analytics conversation details job (async)'; li.className = 'ok'; li.textContent = `Found in ${label}`; }
+        else li.textContent = `Not in ${label}`;
+        end = start;
+      }
+    }
+
+    if (!found) {
+      const avail = await jobAvailability();
+      showMsg(`Interaction ${id} was not found by the direct lookup, the synchronous query, or the async job (searched ${Math.round(parseInt($('lookback').value, 10))} days).\nCheck the ID is correct and belongs to this org/region, or widen "Search back".${avail ? `\nNote: the async job only holds data up to ${new Date(avail).toLocaleString()}.` : ''}`, 'warn');
       return;
     }
 
@@ -637,7 +685,8 @@ async function retrieve() {
     } else {
       showMsg('The interaction was found, but it has no flow outcomes or milestones recorded against it.', 'info');
     }
-    S.result = { conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events };
+    if (!found.conversationEnd && $('msg').hidden) showMsg('This interaction has not ended yet, so the outcomes and milestones shown may be incomplete.', 'info');
+    S.result = { source, conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events };
   } catch (e) {
     if (seq === S.runSeq) {
       showMsg('Could not retrieve the interaction: ' + e.message + (e.status === 403 ? '\nThe signed-in user and OAuth client need permission to read analytics conversation details.' : ''));
@@ -699,7 +748,7 @@ function renderResults() {
   const nm = ev.filter((e) => e.kind === 'Milestone').length, no = ev.length - nm;
   $('nAll').textContent = `(${ev.length})`; $('nMs').textContent = `(${nm})`; $('nOc').textContent = `(${no})`;
   document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.f === S.filter)));
-  $('meta').innerHTML = `Interaction <strong>${esc(r.conversationId)}</strong>${r.conversationStart ? ` · started ${esc(fmtTime(r.conversationStart).main)}` : ''} · shown in order of encounter`;
+  $('meta').innerHTML = `Interaction <strong>${esc(r.conversationId)}</strong>${r.conversationStart ? ` · started ${esc(fmtTime(r.conversationStart).main)}` : ''} · shown in order of encounter${r.source ? ` · source: ${esc(r.source)}` : ''}`;
 
   const list = S.filter === 'all' ? ev : ev.filter((e) => e.kind === S.filter);
   if (!list.length) { $('empty').textContent = ev.length ? 'Nothing of this type on the interaction.' : 'This interaction has no outcomes or milestones recorded.'; $('empty').hidden = false; $('body').hidden = true; return; }
@@ -739,7 +788,7 @@ function downloadCsv() {
 function downloadJson() {
   const r = S.result; if (!r) return;
   const out = {
-    conversationId: r.conversationId, organization: S.org, region: S.domain, retrievedAt: new Date().toISOString(),
+    conversationId: r.conversationId, organization: S.org, region: S.domain, retrievedAt: new Date().toISOString(), source: r.source,
     conversationStart: r.conversationStart, conversationEnd: r.conversationEnd,
     events: r.events.map((e) => ({
       order: e.order, timestamp: e.ts, type: e.kind, name: e.name, nameResolvedFromArchitect: e.resolved, id: e.id,
