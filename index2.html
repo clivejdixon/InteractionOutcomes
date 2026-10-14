@@ -180,6 +180,19 @@
   .vab.fail { background: #FEF3F2; color: #B42318; }
   .tablewrap { max-height: calc(100vh - 300px); }
   .fnote { color: var(--mute); font-size: 12px; }
+  .sumbar .spacer { margin-left: auto; display: flex; gap: 8px; }
+  tr.grp td { background: #fff; }
+  tr.grp.open td { background: #FFF6F1; }
+  tr.child td { background: #F7FAFD; border-bottom: 1px solid #E3EAF4; }
+  tr.child td:first-child { box-shadow: inset 4px 0 0 var(--cyan); }
+  tr.child td.nm { padding-left: 34px; }
+  tr.child .oi { width: 24px; height: 24px; }
+  tr.child .kind { padding-left: 22px; color: var(--blue); }
+  .kind .twisty { width: 24px; height: 24px; font-size: 11px; color: var(--navy); background: #EEF1F8; border-radius: 50%; }
+  .kind .twisty:hover:not(:disabled) { background: #FFE1D4; }
+  .kind .tw-sp { display: inline-block; width: 24px; flex: none; }
+  .tkn.ms { margin-left: 6px; white-space: nowrap; }
+  .vab.none { background: #FFFAEB; color: #B54708; }
 </style>
 </head>
 <body>
@@ -211,9 +224,10 @@
         <p class="meta" id="meta">Enter an interaction (conversation) ID and choose Retrieve.</p>
         <div class="msg info" id="notes" hidden></div>
         <div class="sumbar" id="sumbar" hidden>
-          <button class="chip" type="button" data-f="all" aria-pressed="true">All <span id="nAll"></span></button>
-          <button class="chip" type="button" data-f="Milestone" aria-pressed="false">Milestones <span id="nMs"></span></button>
-          <button class="chip" type="button" data-f="Outcome" aria-pressed="false">Outcomes <span id="nOc"></span></button>
+          <button class="chip" type="button" data-v="group" aria-pressed="true">Grouped by outcome</button>
+          <button class="chip" type="button" data-v="flat" aria-pressed="false">Timeline</button>
+          <span class="fnote" id="counts"></span>
+          <span class="spacer" id="grpBtns"><button class="btn small" id="expAll" type="button">Expand all</button><button class="btn small" id="colAll" type="button">Collapse all</button></span>
         </div>
         <div class="card">
           <div id="empty" class="empty">No results yet.</div>
@@ -296,7 +310,7 @@ const S = {
   token: null, org: null, domain: null,
   busy: false, runSeq: 0,
   result: null,            // { conversationId, conversationStart, conversationEnd, interval, events[] }
-  filter: 'all',
+  view: 'group', open: new Set(),   // 'group' = outcomes with expandable milestones, 'flat' = single timeline
   names: new Map(),        // 'milestone:id' | 'outcome:id' -> Promise<{name, description, error}>
 };
 
@@ -723,7 +737,7 @@ async function retrieve() {
   const id = $('convId').value.trim().toLowerCase();
   if (!GUID.test(id)) return showMsg('Enter a valid interaction ID (a GUID such as 3f2a9c1e-7b4d-4e0a-9c55-1d2e3f4a5b6c).');
   const seq = ++S.runSeq;
-  S.busy = true; S.result = null; S.filter = 'all'; $('log').innerHTML = '';
+  S.busy = true; S.result = null; S.view = 'group'; S.open = new Set(); $('log').innerHTML = '';
   renderAll();
 
   try {
@@ -810,7 +824,7 @@ async function retrieve() {
       showMsg('The interaction was found, but it has no flow outcomes or milestones recorded against it.', 'info');
     }
     if (!found.conversationEnd && $('msg').hidden) showMsg('This interaction has not ended yet, so the outcomes and milestones shown may be incomplete.', 'info');
-    S.result = { source, notes, conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events };
+    S.result = { source, notes, groups: linkMilestones(events), conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events };
   } catch (e) {
     if (seq === S.runSeq) {
       showMsg('Could not retrieve the interaction: ' + e.message + (e.status === 403 ? '\nThe signed-in user and OAuth client need permission to read analytics conversation details.' : ''));
@@ -818,6 +832,48 @@ async function retrieve() {
   } finally {
     if (seq === S.runSeq) { S.busy = false; renderAll(); }
   }
+}
+
+/* ---------- group milestones under their parent outcome ---------- */
+// A milestone carries the ID of the outcome it belongs to. If the interaction has several instances of that
+// outcome (e.g. in different flows), the milestone goes to the same session, then the instance whose
+// start/end window is nearest to the milestone's time.
+function linkMilestones(events) {
+  const tk = (e) => (e.sortMs ?? e.ms);
+  const groups = events.filter((e) => e.kind === 'Outcome').map((o) => ({ key: 'o' + o.order, outcome: o, milestones: [] }));
+  const synth = new Map(); const unlinked = { key: 'unlinked', outcome: null, milestones: [] };
+  events.filter((e) => e.kind === 'Milestone').forEach((m) => {
+    if (!m.outcomeId) { unlinked.milestones.push(m); return; }
+    let cand = groups.filter((g) => g.outcome.id === m.outcomeId);
+    if (!cand.length) {
+      let g = synth.get(m.outcomeId);
+      if (!g) {
+        g = { key: 's' + m.outcomeId, milestones: [], outcome: { kind: 'Outcome', synthetic: true, id: m.outcomeId, name: m.outcomeName || m.outcomeId, resolved: true, value: '', ts: '', ms: null, precision: 'exact', durationMs: null, flowName: m.flowName, flowType: m.flowType, flowVersion: m.flowVersion, participant: m.participant } };
+        synth.set(m.outcomeId, g);
+      }
+      g.milestones.push(m); return;
+    }
+    if (cand.length > 1) {
+      const sameSession = cand.filter((g) => m.sessionId && g.outcome.sessionId === m.sessionId);
+      if (sameSession.length) cand = sameSession;
+    }
+    let pick = cand[0];
+    const t = tk(m);
+    if (cand.length > 1 && t !== null) {
+      const dist = (g) => { const s = g.outcome.ms, e = Date.parse(g.outcome.end); const en = Number.isNaN(e) ? s : e; if (s === null) return Infinity; return t < s ? s - t : t > en ? t - en : 0; };
+      pick = cand.reduce((best, g) => (dist(g) < dist(best) ? g : best), cand[0]);
+    }
+    pick.milestones.push(m);
+  });
+  const all = [...groups, ...synth.values()];
+  all.forEach((g) => {
+    g.milestones.sort((a, b) => (tk(a) ?? Infinity) - (tk(b) ?? Infinity) || a.order - b.order);
+    if (g.outcome.synthetic && g.milestones.length) { const f = g.milestones[0]; g.outcome.ts = f.ts; g.outcome.ms = f.ms; g.outcome.sortMs = tk(f); g.outcome.precision = f.precision; }
+  });
+  all.sort((a, b) => ((a.outcome.sortMs ?? a.outcome.ms) ?? Infinity) - ((b.outcome.sortMs ?? b.outcome.ms) ?? Infinity));
+  if (unlinked.milestones.length) { unlinked.milestones.sort((a, b) => (tk(a) ?? Infinity) - (tk(b) ?? Infinity)); all.push(unlinked); }
+  all.forEach((g) => g.milestones.forEach((m) => { m.parentName = g.outcome ? g.outcome.name : ''; m.parentOrder = g.outcome && g.outcome.order ? g.outcome.order : ''; }));
+  return all;
 }
 
 /* ---------- rendering ---------- */
@@ -840,6 +896,7 @@ function fmtDur(ms) {
 }
 function valueBadge(e) {
   if (e.kind !== 'Outcome') return '<span class="fnote">—</span>';
+  if (e.synthetic) return '<span class="vab none" title="Milestones were recorded for this outcome but no outcome result was set">No result recorded</span>';
   const v = String(e.value || '').toUpperCase();
   const cls = v === 'SUCCESS' ? 'succ' : v === 'FAILURE' ? 'fail' : 'off';
   return `<span class="vab ${cls}">${esc(e.value || 'Unknown')}</span>${e.durationMs !== null ? `<div class="fnote">${esc(fmtDur(e.durationMs))}</div>` : ''}`;
@@ -857,6 +914,41 @@ function renderAuth() {
   $('welcome').hidden = on;
 }
 
+function timeParts(e) {
+  if (e.precision === 'exact' || !e.ts) return fmtTime(e.ts);
+  const d = new Date(Date.parse(e.ts)), p = (x) => String(x).padStart(2, '0');
+  return { main: `~${p(d.getDate())} ${d.toLocaleString(undefined, { month: 'short' })} ${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`, sub: 'within this minute' };
+}
+function flowCell(e) {
+  return e.flowName ? `${esc(e.flowName)}${e.flowVersion ? ` <span class="fnote">v${esc(e.flowVersion)}</span>` : ''}${e.flowType ? `<div class="fnote">${esc(e.flowType)}</div>` : ''}` : '<span class="fnote">—</span>';
+}
+function nameCell(e) {
+  return e.noId ? esc(e.name) : e.resolved ? esc(e.name) : `${esc(e.name || '(unresolved)')} <span class="unres" title="${esc(e.resolveError)}">· not resolved</span>`;
+}
+// One table row. opts: { label, child, toggle:{key,open,count} }
+function rowHtml(e, o) {
+  const t = timeParts(e);
+  let lead = '';
+  if (o.toggle) {
+    const tg = o.toggle;
+    lead = tg.count
+      ? `<button class="twisty" type="button" data-tg="${esc(tg.key)}" aria-expanded="${tg.open}" aria-label="${tg.open ? 'Collapse' : 'Expand'} ${tg.count} milestone${tg.count === 1 ? '' : 's'}">${tg.open ? '▼' : '▶'}</button>`
+      : '<span class="tw-sp"></span>';
+  }
+  const outc = !o.child && !o.grouped && e.kind === 'Milestone' && e.outcomeId ? `<small>outcome: ${esc(e.outcomeName || e.outcomeId)}</small>` : '';
+  const cnt = o.toggle && o.toggle.count ? `<span class="tkn ms">${o.toggle.count} milestone${o.toggle.count === 1 ? '' : 's'}</span>` : '';
+  const idLine = e.id ? `<small>${esc(e.id)}</small>` : '';
+  return `<tr class="${o.child ? 'child' : o.toggle ? 'grp' + (o.toggle.open ? ' open' : '') : ''}">
+      <td class="ord">${esc(o.label)}</td>
+      <td class="time">${esc(t.main)}<small>${esc(t.sub)}</small></td>
+      <td><span class="kind">${lead}<span class="oi">${ICON[e.kind]}</span>${esc(e.kind)}</span></td>
+      <td class="nm">${nameCell(e)}${cnt}${idLine}${outc}</td>
+      <td>${valueBadge(e)}</td>
+      <td>${flowCell(e)}</td>
+      <td>${esc(e.participant || '—')}</td>
+    </tr>`;
+}
+
 function renderResults() {
   const r = S.result, busy = S.busy;
   $('goBtn').disabled = busy; $('goBtn').textContent = busy ? 'Working…' : 'Retrieve';
@@ -872,28 +964,30 @@ function renderResults() {
   $('notes').hidden = !(r.notes && r.notes.length); $('notes').textContent = (r.notes || []).join('\n\n');
   const ev = r.events;
   const nm = ev.filter((e) => e.kind === 'Milestone').length, no = ev.length - nm;
-  $('nAll').textContent = `(${ev.length})`; $('nMs').textContent = `(${nm})`; $('nOc').textContent = `(${no})`;
-  document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.f === S.filter)));
+  document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.v === S.view)));
+  $('grpBtns').hidden = S.view !== 'group';
+  $('counts').textContent = `${no} outcome${no === 1 ? '' : 's'} · ${nm} milestone${nm === 1 ? '' : 's'}`;
   $('meta').innerHTML = `Interaction <strong>${esc(r.conversationId)}</strong>${r.conversationStart ? ` · started ${esc(fmtTime(r.conversationStart).main)}` : ''} · shown in order of encounter${r.source ? ` · source: ${esc(r.source)}` : ''}`;
 
-  const list = S.filter === 'all' ? ev : ev.filter((e) => e.kind === S.filter);
-  if (!list.length) { $('empty').textContent = ev.length ? 'Nothing of this type on the interaction.' : 'This interaction has no outcomes or milestones recorded.'; $('empty').hidden = false; $('body').hidden = true; return; }
+  if (!ev.length) { $('empty').textContent = 'This interaction has no outcomes or milestones recorded.'; $('empty').hidden = false; $('body').hidden = true; return; }
   $('empty').hidden = true; $('body').hidden = false;
-  $('rows').innerHTML = list.map((e) => {
-    const t = e.precision === 'exact' || !e.ts ? fmtTime(e.ts) : (() => { const d = new Date(Date.parse(e.ts)); const p = (x) => String(x).padStart(2, '0'); return { main: `~${p(d.getDate())} ${d.toLocaleString(undefined, { month: 'short' })} ${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`, sub: 'within this minute' }; })();
-    const flow = e.flowName ? `${esc(e.flowName)}${e.flowVersion ? ` <span class="fnote">v${esc(e.flowVersion)}</span>` : ''}${e.flowType ? `<div class="fnote">${esc(e.flowType)}</div>` : ''}` : '<span class="fnote">—</span>';
-    const nameCell = e.noId ? `${esc(e.name)}` : e.resolved ? esc(e.name) : `${esc(e.name || '(unresolved)')} <span class="unres" title="${esc(e.resolveError)}">· not resolved</span>`;
-    const outc = e.kind === 'Milestone' && e.outcomeId ? `<small>outcome: ${esc(e.outcomeName || e.outcomeId)}</small>` : '';
-    return `<tr>
-      <td class="ord">${e.order}</td>
-      <td class="time">${esc(t.main)}<small>${esc(t.sub)}</small></td>
-      <td><span class="kind"><span class="oi">${ICON[e.kind]}</span>${esc(e.kind)}</span></td>
-      <td class="nm">${nameCell}<small>${esc(e.id)}</small>${outc}</td>
-      <td>${valueBadge(e)}</td>
-      <td>${flow}</td>
-      <td>${esc(e.participant || '—')}</td>
-    </tr>`;
-  }).join('');
+
+  if (S.view === 'flat') { $('rows').innerHTML = ev.map((e) => rowHtml(e, { label: e.order })).join(''); return; }
+
+  let html = '', n = 0;
+  (r.groups || []).forEach((g) => {
+    const open = S.open.has(g.key), count = g.milestones.length;
+    if (g.outcome) {
+      n++;
+      html += rowHtml(g.outcome, { label: n, toggle: { key: g.key, open, count } });
+    } else {
+      html += `<tr class="grp${open ? ' open' : ''}"><td class="ord">—</td><td></td>
+        <td><span class="kind">${count ? `<button class="twisty" type="button" data-tg="${g.key}" aria-expanded="${open}">${open ? '▼' : '▶'}</button>` : ''}</span></td>
+        <td class="nm">Milestones not linked to an outcome<span class="tkn ms">${count} milestone${count === 1 ? '' : 's'}</span><small>No outcome ID was available for these</small></td><td></td><td></td><td></td></tr>`;
+    }
+    if (open) g.milestones.forEach((m, j) => { html += rowHtml(m, { label: g.outcome ? `${n}.${j + 1}` : `${j + 1}`, child: true, grouped: true }); });
+  });
+  $('rows').innerHTML = html;
 }
 function renderAll() { renderAuth(); renderResults(); }
 
@@ -907,24 +1001,31 @@ function download(filename, text, mime) {
 const csvCell = (v) => { const s = String(v ?? ''); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 function downloadCsv() {
   const r = S.result; if (!r) return;
-  const head = ['Order', 'Timestamp (UTC)', 'Type', 'Name', 'Architect ID', 'Outcome value', 'Outcome end (UTC)', 'Outcome duration (ms)', 'Flow', 'Flow type', 'Flow version', 'Participant purpose', 'Session ID', 'Conversation ID', 'Milestone outcome ID', 'Milestone outcome', 'Time precision'];
-  const rows = r.events.map((e) => [e.order, e.ts, e.kind, e.name, e.id, e.value, e.end, e.durationMs ?? '', e.flowName, e.flowType, e.flowVersion, e.participant, e.sessionId, r.conversationId, e.outcomeId || '', e.outcomeName || '', e.precision === 'exact' ? 'exact' : 'minute (order within minute not recoverable)']);
+  const head = ['Order', 'Timestamp (UTC)', 'Type', 'Name', 'Architect ID', 'Outcome value', 'Outcome end (UTC)', 'Outcome duration (ms)', 'Flow', 'Flow type', 'Flow version', 'Participant purpose', 'Session ID', 'Conversation ID', 'Milestone outcome ID', 'Parent outcome', 'Parent outcome #', 'Time precision'];
+  const rows = r.events.map((e) => [e.order, e.ts, e.kind, e.name, e.id, e.value, e.end, e.durationMs ?? '', e.flowName, e.flowType, e.flowVersion, e.participant, e.sessionId, r.conversationId, e.outcomeId || '', e.parentName || '', e.parentOrder || '', e.precision === 'exact' ? 'exact' : 'minute (order within minute not recoverable)']);
   const text = '\ufeff' + [head, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
   download(`interaction_${r.conversationId}_outcomes_milestones.csv`, text, 'text/csv;charset=utf-8');
+}
+function jsonEvent(e) {
+  return {
+    order: e.order, timestamp: e.ts || undefined, type: e.kind, name: e.name, nameResolvedFromArchitect: e.resolved, id: e.id,
+    ...(e.kind === 'Outcome' ? (e.synthetic ? { outcomeValue: null, note: 'Milestones were recorded for this outcome but no outcome result was set' } : { outcomeValue: e.value, outcomeEnd: e.end, outcomeDurationMs: e.durationMs, outcomeInstanceId: e.instanceId }) : {}),
+    ...(e.kind === 'Milestone' ? { milestoneOutcomeId: e.outcomeId || undefined, parentOutcome: e.parentName || undefined, timePrecision: e.precision === 'exact' ? 'exact' : 'minute' } : {}),
+    description: e.description || undefined,
+    flow: { id: e.flowId, name: e.flowName, type: e.flowType, version: e.flowVersion },
+    participantPurpose: e.participant, sessionId: e.sessionId,
+  };
 }
 function downloadJson() {
   const r = S.result; if (!r) return;
   const out = {
     conversationId: r.conversationId, organization: S.org, region: S.domain, retrievedAt: new Date().toISOString(), source: r.source, notes: r.notes,
     conversationStart: r.conversationStart, conversationEnd: r.conversationEnd,
-    events: r.events.map((e) => ({
-      order: e.order, timestamp: e.ts, type: e.kind, name: e.name, nameResolvedFromArchitect: e.resolved, id: e.id,
-      ...(e.kind === 'Outcome' ? { outcomeValue: e.value, outcomeEnd: e.end, outcomeDurationMs: e.durationMs, outcomeInstanceId: e.instanceId } : {}),
-      ...(e.kind === 'Milestone' ? { milestoneOutcomeId: e.outcomeId || undefined, milestoneOutcome: e.outcomeName || undefined, timePrecision: e.precision === 'exact' ? 'exact' : 'minute' } : {}),
-      description: e.description || undefined,
-      flow: { id: e.flowId, name: e.flowName, type: e.flowType, version: e.flowVersion },
-      participantPurpose: e.participant, sessionId: e.sessionId,
+    outcomes: (r.groups || []).map((g) => ({
+      ...(g.outcome ? jsonEvent(g.outcome) : { name: 'Milestones not linked to an outcome' }),
+      milestones: g.milestones.map(jsonEvent),
     })),
+    events: r.events.map(jsonEvent),
   };
   download(`interaction_${r.conversationId}_outcomes_milestones.json`, JSON.stringify(out, null, 2), 'application/json');
 }
@@ -939,7 +1040,13 @@ function wire() {
   $('convId').addEventListener('keydown', (e) => { if (e.key === 'Enter') retrieve(); });
   $('csvBtn').addEventListener('click', downloadCsv);
   $('jsonBtn').addEventListener('click', downloadJson);
-  $('sumbar').addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (!b) return; S.filter = b.dataset.f; renderResults(); });
+  $('sumbar').addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (!b) return; S.view = b.dataset.v; renderResults(); });
+  $('rows').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tg]'); if (!b) return;
+    const k = b.dataset.tg; S.open.has(k) ? S.open.delete(k) : S.open.add(k); renderResults();
+  });
+  $('expAll').addEventListener('click', () => { ((S.result && S.result.groups) || []).forEach((g) => g.milestones.length && S.open.add(g.key)); renderResults(); });
+  $('colAll').addEventListener('click', () => { S.open.clear(); renderResults(); });
 }
 
 /* ---------- boot ---------- */
