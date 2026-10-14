@@ -209,6 +209,7 @@
       <section aria-label="Results">
         <h1 class="flows-title">Outcomes &amp; milestones</h1>
         <p class="meta" id="meta">Enter an interaction (conversation) ID and choose Retrieve.</p>
+        <div class="msg info" id="notes" hidden></div>
         <div class="sumbar" id="sumbar" hidden>
           <button class="chip" type="button" data-f="all" aria-pressed="true">All <span id="nAll"></span></button>
           <button class="chip" type="button" data-f="Milestone" aria-pressed="false">Milestones <span id="nMs"></span></button>
@@ -554,34 +555,130 @@ function pickTime(o) {
 }
 function msOf(ts) { const n = Date.parse(ts); return Number.isNaN(n) ? null : n; }
 
-function buildEvents(conv) {
-  const ev = [];
-  (conv.participants || []).forEach((p) => (p.sessions || []).forEach((s) => {
-    const fl = s.flow; if (!fl) return;
-    const base = {
-      flowName: fl.flowName || '', flowType: fl.flowType || '', flowVersion: fl.flowVersion || '', flowId: fl.flowId || '',
-      participant: p.purpose || '', participantName: p.participantName || '', sessionId: s.sessionId || '',
-    };
-    (fl.milestones || []).forEach((m) => {
-      const id = m.milestoneId || m.flowMilestoneId || m.id || firstKey(m, (k) => /milestoneid/i.test(k)) || '';
-      const ts = pickTime(m) || '';
-      ev.push({ ...base, kind: 'Milestone', id, ts, ms: msOf(ts), hint: m.milestoneName || m.flowMilestone || m.name || '', value: '', end: '', durationMs: null });
-    });
-    (fl.outcomes || []).forEach((o) => {
-      const ts = o.flowOutcomeStartTimestamp || pickTime(o) || '';
-      const end = o.flowOutcomeEndTimestamp || '';
-      const a = msOf(ts), b = msOf(end);
-      ev.push({ ...base, kind: 'Outcome', id: o.flowOutcomeId || '', instanceId: o.outcomeId || '', ts, ms: a, hint: o.flowOutcome || o.flowOutcomeName || '', value: o.flowOutcomeValue || '', end, durationMs: a !== null && b !== null ? b - a : null });
-    });
-  }));
+// Find milestone-like arrays anywhere inside a flow object (the documented schema has none, but newer
+// API versions may add them, so this is checked first).
+function walkMilestones(o, out, depth = 0) {
+  if (!o || typeof o !== 'object' || depth > 6) return;
+  for (const [k, v] of Object.entries(o)) {
+    if (/milestone/i.test(k) && Array.isArray(v) && v.length && typeof v[0] === 'object') v.forEach((m) => out.push(m));
+    else if (v && typeof v === 'object') walkMilestones(v, out, depth + 1);
+  }
+}
+function walkMetrics(o, out, depth = 0) {
+  if (!o || typeof o !== 'object' || depth > 6) return;
+  for (const [k, v] of Object.entries(o)) {
+    if (k === 'metrics' && Array.isArray(v)) v.forEach((m) => out.push(m));
+    else if (v && typeof v === 'object') walkMetrics(v, out, depth + 1);
+  }
+}
+function sortEvents(ev) {
+  const key = (e) => (e.sortMs ?? e.ms);
   ev.forEach((e, i) => (e._i = i));
   ev.sort((a, b) => {
-    if (a.ms === null && b.ms === null) return a._i - b._i;
-    if (a.ms === null) return 1; if (b.ms === null) return -1;
-    return a.ms - b.ms || a._i - b._i;
+    const x = key(a), y = key(b);
+    if (x === null && y === null) return a._i - b._i;
+    if (x === null) return 1; if (y === null) return -1;
+    return x - y || a._i - b._i;
   });
   ev.forEach((e, i) => { e.order = i + 1; delete e._i; });
   return ev;
+}
+
+function buildEvents(conv) {
+  const ev = [], metricMs = [];
+  (conv.participants || []).forEach((p) => (p.sessions || []).forEach((s) => {
+    const fl = s.flow;
+    const base = {
+      flowName: (fl && fl.flowName) || '', flowType: (fl && fl.flowType) || '', flowVersion: (fl && fl.flowVersion) || '', flowId: (fl && fl.flowId) || '',
+      participant: p.purpose || '', participantName: p.participantName || '', sessionId: s.sessionId || '',
+    };
+    // milestone IDs, if analytics ever supplies them as structured data
+    const ms = []; if (fl) walkMilestones(fl, ms);
+    ms.forEach((m) => {
+      const id = m.milestoneId || m.flowMilestoneId || m.id || firstKey(m, (k) => /milestoneid/i.test(k)) || '';
+      const ts = pickTime(m) || '';
+      ev.push({ ...base, kind: 'Milestone', id, outcomeId: m.flowOutcomeId || '', ts, ms: msOf(ts), precision: 'exact', hint: m.milestoneName || m.flowMilestone || m.name || '', value: '', end: '', durationMs: null });
+    });
+    // milestone *metrics* (timestamp only, no ID) - what analytics really holds today
+    const mets = []; walkMetrics(s, mets);
+    const named = (n) => mets.filter((m) => m && m.name === n);
+    const src = named('nFlowMilestone').length ? named('nFlowMilestone') : named('oFlowMilestone');
+    src.forEach((m) => {
+      const n = Math.max(1, Math.min(50, Math.round(Number(m.value) || 1)));
+      for (let i = 0; i < n; i++) metricMs.push({ ...base, ts: m.emitDate || '', ms: msOf(m.emitDate) });
+    });
+    if (fl) (fl.outcomes || []).forEach((o) => {
+      const ts = o.flowOutcomeStartTimestamp || pickTime(o) || '';
+      const end = o.flowOutcomeEndTimestamp || '';
+      const a = msOf(ts), b = msOf(end);
+      ev.push({ ...base, kind: 'Outcome', id: o.flowOutcomeId || '', instanceId: o.outcomeId || '', ts, ms: a, precision: 'exact', hint: o.flowOutcome || o.flowOutcomeName || '', value: o.flowOutcomeValue || '', end, durationMs: a !== null && b !== null ? b - a : null });
+    });
+  }));
+  metricMs.sort((x, y) => (x.ms ?? Infinity) - (y.ms ?? Infinity));
+  return { events: sortEvents(ev), metricMs };
+}
+
+/* ---------- milestone IDs: flow aggregates + milestone metrics ---------- */
+// Conversation details only carry a timestamped milestone *count* (metrics). The IDs are available from the
+// flow aggregates query grouped by flowMilestoneId, filtered to this conversation, in 1-minute buckets.
+// The two are joined per minute: a minute with a single milestone ID gets an exact timestamp for each hit;
+// a minute with several different IDs cannot be ordered, so those rows are marked as minute-level.
+async function fetchMilestoneAggregates(conv, metricMs) {
+  const t0 = [msOf(conv.conversationStart), ...metricMs.map((m) => m.ms)].filter((x) => x !== null);
+  const t1 = [msOf(conv.conversationEnd) ?? Date.now(), ...metricMs.map((m) => m.ms)].filter((x) => x !== null);
+  const startB = Math.floor(Math.min(...t0) / 60000) * 60000 - 60000;
+  const endB = Math.ceil(Math.max(...t1) / 60000) * 60000 + 60000;
+  const span = endB - startB;
+  const interval = `${new Date(startB).toISOString()}/${new Date(endB).toISOString()}`;
+  const filter = { type: 'and', predicates: [{ type: 'dimension', dimension: 'conversationId', operator: 'matches', value: conv.conversationId }] };
+  const attempt = async (groupBy) => api('/api/v2/analytics/flows/aggregates/query', {
+    method: 'POST',
+    body: JSON.stringify({ interval, ...(span <= 24 * 3600000 ? { granularity: 'PT1M' } : {}), groupBy, metrics: ['oFlowMilestone'], filter }),
+  });
+  let res;
+  try { res = await attempt(['flowMilestoneId', 'flowOutcomeId']); }
+  catch (e) { if (e.status === 400) res = await attempt(['flowMilestoneId']); else throw e; }
+  const entries = [];
+  ((res && res.results) || []).forEach((g) => {
+    const id = g.group && g.group.flowMilestoneId; if (!id) return;
+    (g.data || []).forEach((d) => {
+      const m = (d.metrics || []).find((x) => x.metric === 'oFlowMilestone'); if (!m) return;
+      const count = Math.round((m.stats && (m.stats.count ?? m.stats.sum)) || 0); if (!count) return;
+      const bucket = String(d.interval || '').split('/')[0];
+      entries.push({ id, outcomeId: (g.group && g.group.flowOutcomeId) || '', count, bucket: msOf(bucket) });
+    });
+  });
+  return { entries, gran: span <= 24 * 3600000 };
+}
+
+function joinMilestones(aggEntries, gran, metricMs) {
+  const rows = []; let approx = 0;
+  const key = (ms) => (gran && ms !== null ? Math.floor(ms / 60000) * 60000 : 'all');
+  const buckets = new Map();
+  const get = (k) => { if (!buckets.has(k)) buckets.set(k, { A: [], E: [] }); return buckets.get(k); };
+  aggEntries.forEach((a) => get(key(a.bucket)).A.push(a));
+  metricMs.forEach((m) => get(key(m.ms)).E.push(m));
+  const mk = (extra) => ({ kind: 'Milestone', value: '', end: '', durationMs: null, hint: '', ...extra });
+  for (const [k, { A, E }] of buckets) {
+    const total = A.reduce((s, a) => s + a.count, 0);
+    const ids = new Set(A.map((a) => a.id));
+    if (!A.length) { E.forEach((m) => rows.push(mk({ ...m, id: '', outcomeId: '', precision: 'exact' }))); continue; }
+    if (ids.size === 1 && E.length) {
+      const a = A[0];
+      for (let i = 0; i < Math.max(total, E.length); i++) {
+        const m = E[i];
+        if (m && i < total) rows.push(mk({ ...m, id: a.id, outcomeId: a.outcomeId, precision: 'exact' }));
+        else if (m) rows.push(mk({ ...m, id: '', outcomeId: '', precision: 'exact' }));
+        else { rows.push(mk({ ...(E[0] || {}), id: a.id, outcomeId: a.outcomeId, ts: new Date(k === 'all' ? Date.now() : k).toISOString(), ms: k === 'all' ? null : k, sortMs: (E[E.length - 1] || {}).ms ?? null, precision: 'minute' })); approx++; }
+      }
+      continue;
+    }
+    // several different IDs in this minute (or no timestamps): the order cannot be recovered
+    const stamp = k === 'all' ? '' : new Date(k).toISOString();
+    let n = 0;
+    A.forEach((a) => { for (let i = 0; i < a.count; i++) { rows.push(mk({ ...(E[0] || {}), id: a.id, outcomeId: a.outcomeId, ts: stamp, ms: k === 'all' ? null : k, sortMs: (E[n] || E[E.length - 1] || {}).ms ?? null, precision: k === 'all' ? 'unordered' : 'minute' })); n++; approx++; } });
+  }
+  return { rows, approx };
 }
 
 /* ---------- Architect name resolution ---------- */
@@ -597,20 +694,25 @@ function resolveName(kind, id) {
 }
 
 async function resolveAll(events, seq, onProgress) {
-  const uniq = [...new Map(events.map((e) => [e.kind + ':' + e.id, e])).values()];
+  const keys = new Map();
+  const add = (kind, id) => { if (id) keys.set(kind + ':' + id, [kind, id]); };
+  events.forEach((e) => { add(e.kind === 'Milestone' ? 'milestone' : 'outcome', e.id); if (e.kind === 'Milestone') add('outcome', e.outcomeId); });
+  const uniq = [...keys.values()];
   let done = 0, next = 0;
   const worker = async () => {
     while (next < uniq.length) {
       if (seq !== S.runSeq) return;
-      const e = uniq[next++];
-      await resolveName(e.kind === 'Milestone' ? 'milestone' : 'outcome', e.id);
+      const [kind, id] = uniq[next++];
+      await resolveName(kind, id);
       onProgress(++done, uniq.length);
     }
   };
   await Promise.all(Array.from({ length: 4 }, worker));
   for (const e of events) {
+    if (!e.id) { e.noId = true; e.name = e.hint || 'Milestone (ID not available)'; e.resolved = true; e.resolveError = ''; e.description = ''; continue; }
     const r = await resolveName(e.kind === 'Milestone' ? 'milestone' : 'outcome', e.id);
     e.name = r.name || e.hint || ''; e.resolved = !!r.name; e.resolveError = r.name ? '' : (r.error || ''); e.description = r.description || '';
+    if (e.kind === 'Milestone' && e.outcomeId) { const o = await resolveName('outcome', e.outcomeId); e.outcomeName = o.name || ''; }
   }
 }
 
@@ -668,9 +770,31 @@ async function retrieve() {
       return;
     }
 
-    const events = buildEvents(found);
+    const built = buildEvents(found);
+    const events = built.events, notes = [];
+    if (!events.some((e) => e.kind === 'Milestone')) {
+      // analytics gave no milestone IDs: rebuild them from milestone metrics + flow aggregates
+      logLine(`${built.metricMs.length} milestone event${built.metricMs.length === 1 ? '' : 's'} in the analytics metrics (timestamps only, no IDs)`);
+      const li2 = logLine('<span class="spinner"></span>Looking up milestone IDs from flow aggregates…');
+      try {
+        const agg = await fetchMilestoneAggregates(found, built.metricMs);
+        if (seq !== S.runSeq) return;
+        const j = joinMilestones(agg.entries, agg.gran, built.metricMs);
+        j.rows.forEach((r) => events.push(r));
+        const withId = j.rows.filter((r) => r.id).length;
+        li2.className = withId ? 'ok' : ''; li2.textContent = withId ? `Matched ${withId} milestone${withId === 1 ? '' : 's'} to IDs` : 'No milestone IDs returned by flow aggregates';
+        if (j.rows.length) notes.push('Genesys analytics does not store milestone IDs in the conversation record. Milestones here are rebuilt by joining the per-minute flow aggregates (which carry the IDs) with the timestamped milestone metrics. ' + (j.approx ? `${j.approx} milestone${j.approx === 1 ? '' : 's'} happened in a minute that contained several different milestones (or no timestamp), so their exact order and time within that minute is not recoverable; these show a minute-level time marked "~".` : 'Every milestone could be placed at its exact time.'));
+        if (!withId && built.metricMs.length) notes.push('Milestone events were recorded, but flow aggregates returned no IDs for them yet (aggregates can lag by a few minutes), so they are listed by time only.');
+      } catch (e) {
+        if (seq !== S.runSeq) return;
+        li2.className = 'bad'; li2.textContent = 'Flow aggregates unavailable: ' + e.message;
+        built.metricMs.forEach((m) => events.push({ kind: 'Milestone', value: '', end: '', durationMs: null, hint: '', ...m, id: '', outcomeId: '', precision: 'exact' }));
+        notes.push(`Milestone IDs could not be retrieved (${e.message}). ${built.metricMs.length} milestone event${built.metricMs.length === 1 ? '' : 's'} are shown with their timestamps only.${e.status === 403 ? ' The user and OAuth client need permission to read flow aggregates (analytics flowAggregate view).' : ''}`);
+      }
+      sortEvents(events);
+    }
     const nm = events.filter((e) => e.kind === 'Milestone').length, no = events.length - nm;
-    logLine(`${nm} milestone${nm === 1 ? '' : 's'} and ${no} outcome${no === 1 ? '' : 's'} in the analytics record`);
+    logLine(`${nm} milestone${nm === 1 ? '' : 's'} and ${no} outcome${no === 1 ? '' : 's'} found`);
     if (events.length) {
       const li = logLine('<span class="spinner"></span>Resolving Architect names…');
       await resolveAll(events, seq, (d, t) => { li.innerHTML = `<span class="spinner"></span>Resolving Architect names ${d} of ${t}…`; });
@@ -686,7 +810,7 @@ async function retrieve() {
       showMsg('The interaction was found, but it has no flow outcomes or milestones recorded against it.', 'info');
     }
     if (!found.conversationEnd && $('msg').hidden) showMsg('This interaction has not ended yet, so the outcomes and milestones shown may be incomplete.', 'info');
-    S.result = { source, conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events };
+    S.result = { source, notes, conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events };
   } catch (e) {
     if (seq === S.runSeq) {
       showMsg('Could not retrieve the interaction: ' + e.message + (e.status === 403 ? '\nThe signed-in user and OAuth client need permission to read analytics conversation details.' : ''));
@@ -741,9 +865,11 @@ function renderResults() {
   $('sumbar').hidden = !(r && r.events.length);
 
   if (!r) {
+    $('notes').hidden = true;
     $('meta').textContent = busy ? 'Retrieving…' : 'Enter an interaction (conversation) ID and choose Retrieve.';
     $('empty').textContent = busy ? 'Working…' : 'No results yet.'; $('empty').hidden = false; $('body').hidden = true; return;
   }
+  $('notes').hidden = !(r.notes && r.notes.length); $('notes').textContent = (r.notes || []).join('\n\n');
   const ev = r.events;
   const nm = ev.filter((e) => e.kind === 'Milestone').length, no = ev.length - nm;
   $('nAll').textContent = `(${ev.length})`; $('nMs').textContent = `(${nm})`; $('nOc').textContent = `(${no})`;
@@ -754,14 +880,15 @@ function renderResults() {
   if (!list.length) { $('empty').textContent = ev.length ? 'Nothing of this type on the interaction.' : 'This interaction has no outcomes or milestones recorded.'; $('empty').hidden = false; $('body').hidden = true; return; }
   $('empty').hidden = true; $('body').hidden = false;
   $('rows').innerHTML = list.map((e) => {
-    const t = fmtTime(e.ts);
+    const t = e.precision === 'exact' || !e.ts ? fmtTime(e.ts) : (() => { const d = new Date(Date.parse(e.ts)); const p = (x) => String(x).padStart(2, '0'); return { main: `~${p(d.getDate())} ${d.toLocaleString(undefined, { month: 'short' })} ${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`, sub: 'within this minute' }; })();
     const flow = e.flowName ? `${esc(e.flowName)}${e.flowVersion ? ` <span class="fnote">v${esc(e.flowVersion)}</span>` : ''}${e.flowType ? `<div class="fnote">${esc(e.flowType)}</div>` : ''}` : '<span class="fnote">—</span>';
-    const nameCell = e.resolved ? esc(e.name) : `${esc(e.name || '(unresolved)')} <span class="unres" title="${esc(e.resolveError)}">· not resolved</span>`;
+    const nameCell = e.noId ? `${esc(e.name)}` : e.resolved ? esc(e.name) : `${esc(e.name || '(unresolved)')} <span class="unres" title="${esc(e.resolveError)}">· not resolved</span>`;
+    const outc = e.kind === 'Milestone' && e.outcomeId ? `<small>outcome: ${esc(e.outcomeName || e.outcomeId)}</small>` : '';
     return `<tr>
       <td class="ord">${e.order}</td>
       <td class="time">${esc(t.main)}<small>${esc(t.sub)}</small></td>
       <td><span class="kind"><span class="oi">${ICON[e.kind]}</span>${esc(e.kind)}</span></td>
-      <td class="nm">${nameCell}<small>${esc(e.id)}</small></td>
+      <td class="nm">${nameCell}<small>${esc(e.id)}</small>${outc}</td>
       <td>${valueBadge(e)}</td>
       <td>${flow}</td>
       <td>${esc(e.participant || '—')}</td>
@@ -780,19 +907,20 @@ function download(filename, text, mime) {
 const csvCell = (v) => { const s = String(v ?? ''); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 function downloadCsv() {
   const r = S.result; if (!r) return;
-  const head = ['Order', 'Timestamp (UTC)', 'Type', 'Name', 'Architect ID', 'Outcome value', 'Outcome end (UTC)', 'Outcome duration (ms)', 'Flow', 'Flow type', 'Flow version', 'Participant purpose', 'Session ID', 'Conversation ID'];
-  const rows = r.events.map((e) => [e.order, e.ts, e.kind, e.name, e.id, e.value, e.end, e.durationMs ?? '', e.flowName, e.flowType, e.flowVersion, e.participant, e.sessionId, r.conversationId]);
+  const head = ['Order', 'Timestamp (UTC)', 'Type', 'Name', 'Architect ID', 'Outcome value', 'Outcome end (UTC)', 'Outcome duration (ms)', 'Flow', 'Flow type', 'Flow version', 'Participant purpose', 'Session ID', 'Conversation ID', 'Milestone outcome ID', 'Milestone outcome', 'Time precision'];
+  const rows = r.events.map((e) => [e.order, e.ts, e.kind, e.name, e.id, e.value, e.end, e.durationMs ?? '', e.flowName, e.flowType, e.flowVersion, e.participant, e.sessionId, r.conversationId, e.outcomeId || '', e.outcomeName || '', e.precision === 'exact' ? 'exact' : 'minute (order within minute not recoverable)']);
   const text = '\ufeff' + [head, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
   download(`interaction_${r.conversationId}_outcomes_milestones.csv`, text, 'text/csv;charset=utf-8');
 }
 function downloadJson() {
   const r = S.result; if (!r) return;
   const out = {
-    conversationId: r.conversationId, organization: S.org, region: S.domain, retrievedAt: new Date().toISOString(), source: r.source,
+    conversationId: r.conversationId, organization: S.org, region: S.domain, retrievedAt: new Date().toISOString(), source: r.source, notes: r.notes,
     conversationStart: r.conversationStart, conversationEnd: r.conversationEnd,
     events: r.events.map((e) => ({
       order: e.order, timestamp: e.ts, type: e.kind, name: e.name, nameResolvedFromArchitect: e.resolved, id: e.id,
       ...(e.kind === 'Outcome' ? { outcomeValue: e.value, outcomeEnd: e.end, outcomeDurationMs: e.durationMs, outcomeInstanceId: e.instanceId } : {}),
+      ...(e.kind === 'Milestone' ? { milestoneOutcomeId: e.outcomeId || undefined, milestoneOutcome: e.outcomeName || undefined, timePrecision: e.precision === 'exact' ? 'exact' : 'minute' } : {}),
       description: e.description || undefined,
       flow: { id: e.flowId, name: e.flowName, type: e.flowType, version: e.flowVersion },
       participantPurpose: e.participant, sessionId: e.sessionId,
