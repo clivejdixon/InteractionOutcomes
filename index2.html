@@ -494,8 +494,8 @@ async function runJob(conversationId, startMs, endMs, seq) {
       conversationFilters: [{ type: 'and', predicates: [{ type: 'dimension', dimension: 'conversationId', operator: 'matches', value: conversationId }] }],
     }),
   });
-  const jobId = job && job.id;
-  if (!jobId) throw new Error('The analytics job was created but no job ID was returned.');
+  const jobId = job && (job.jobId || job.id);
+  if (!jobId) throw new Error('The analytics job was created but no job ID was returned. Response: ' + JSON.stringify(job));
 
   // poll until finished
   const t0 = Date.now(); let delay = 1000;
