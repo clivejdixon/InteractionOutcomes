@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Mulish:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root {
     --paper: #FAF7F6; --navy: #122550; --navy-deep: #0C1B3E; --orange: #FF5618; --orange-ink: #C93D0C; --amber: #FF9002;
@@ -193,6 +194,21 @@
   .kind .tw-sp { display: inline-block; width: 24px; flex: none; }
   .tkn.ms { margin-left: 6px; white-space: nowrap; }
   .vab.none { background: #FFFAEB; color: #B54708; }
+  .modebar { margin: 0 0 14px; }
+  .drop { display: block; border: 2px dashed var(--navy); border-radius: 14px; padding: 18px 14px; text-align: center; cursor: pointer; background: #fff; transition: background .15s; }
+  .drop:hover, .drop.over { background: #FFF6F1; border-color: var(--orange); }
+  .drop strong { display: block; color: var(--navy); font-size: 14px; }
+  .drop span { color: var(--mute); font-size: 12px; }
+  .bar { height: 10px; border-radius: 999px; background: #E3EAF4; overflow: hidden; margin: 10px 0 4px; }
+  .bar > div { height: 100%; width: 0; background: var(--grad); transition: width .25s; }
+  #btable td, #btable th { white-space: nowrap; font-size: 12.5px; }
+  #btable th { white-space: normal; min-width: 110px; vertical-align: bottom; }
+  #btable td:first-child, #btable th:first-child { position: sticky; left: 0; z-index: 2; background: #fff; min-width: 290px; box-shadow: 2px 0 0 #E3EAF4; }
+  #btable td.id button { font: inherit; font-weight: 700; color: var(--blue); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+  #btable td.st { font-weight: 700; }
+  #btable td.st.bad { color: var(--red); } #btable td.st.warn { color: var(--orange-ink); } #btable td.st.good { color: var(--green-ink); }
+  .vtok { display: inline-block; font-weight: 800; font-size: 11.5px; padding: 2px 8px; border-radius: 999px; margin-right: 4px; background: #EEF1F8; color: var(--navy); }
+  .vtok.succ { background: #E3F6EC; color: #176B43; } .vtok.fail { background: #FEF3F2; color: #B42318; } .vtok.cnt { background: #E8F1FB; color: var(--blue); }
 </style>
 </head>
 <body>
@@ -215,11 +231,11 @@
 
     <section class="welcome" id="welcome">
       <h2>Connect to a Genesys Cloud org</h2>
-      <p>Choose a region, paste the PKCE client ID and sign in. You can then look up the Architect outcomes and milestones recorded against any interaction.</p>
+      <p>Choose a region, paste the PKCE client ID and sign in. You can then look up the Architect outcomes and milestones recorded against one interaction, or against a whole spreadsheet of interaction IDs.</p>
     </section>
 
     <main class="workspace" id="workspace" hidden>
-      <section aria-label="Results">
+      <section aria-label="Results" id="singleView">
         <h1 class="flows-title">Outcomes &amp; milestones</h1>
         <p class="meta" id="meta">Enter an interaction (conversation) ID and choose Retrieve.</p>
         <div class="msg info" id="notes" hidden></div>
@@ -244,7 +260,48 @@
         </div>
       </section>
 
+      <section aria-label="Bulk results" id="bulkView" hidden>
+        <h1 class="flows-title">Spreadsheet results</h1>
+        <p class="meta" id="bmeta">Choose a spreadsheet of interaction IDs, then choose Retrieve.</p>
+        <div class="msg info" id="bnotes" hidden></div>
+        <div class="card">
+          <div id="bempty" class="empty">No results yet.</div>
+          <div id="bbody" hidden>
+            <div class="tablewrap"><table id="btable"><thead id="bhead"></thead><tbody id="brows"></tbody></table></div>
+          </div>
+        </div>
+      </section>
+
       <section class="side" aria-label="Lookup">
+        <div class="sumbar modebar" id="modeBar">
+          <button class="chip" type="button" data-m="single" aria-pressed="true">Single interaction</button>
+          <button class="chip" type="button" data-m="bulk" aria-pressed="false">Spreadsheet</button>
+        </div>
+        <div id="bulkPanel" hidden>
+          <h2>Spreadsheet of interaction IDs</h2>
+          <label class="drop" id="drop"><input type="file" id="xlsFile" accept=".xlsx,.xls,.xlsm,.csv,.txt" hidden />
+            <strong>Choose a spreadsheet</strong><span>or drop it here (.xlsx, .xls or .csv)</span></label>
+          <p class="note" id="fileInfo">The sheet needs a column of interaction IDs. Any other column headings are used as the columns of the summary.</p>
+          <label class="field"><span>Search back (async job fallback)</span>
+            <select id="lookback2">
+              <option value="31">Last 31 days</option>
+              <option value="93">Last 3 months</option>
+              <option value="186">Last 6 months</option>
+              <option value="366">Last 12 months</option>
+            </select></label>
+          <button class="btn primary" id="bulkBtn" type="button" disabled>Retrieve outcomes &amp; milestones</button>
+          <button class="btn" id="bulkStop" type="button" hidden>Stop</button>
+          <div class="bar" id="bar" hidden><div id="barFill"></div></div>
+          <p class="note" id="barText"></p>
+          <ul class="log" id="blog"></ul>
+          <h2>Download</h2>
+          <div class="dlbtns">
+            <button class="btn" id="sumCsv" type="button" disabled>Summary CSV</button>
+            <button class="btn" id="detCsv" type="button" disabled>Detail CSV</button>
+          </div>
+          <p class="note"><strong>Summary</strong>: one row per interaction with your sheet's columns filled in (outcome columns show SUCCESS or FAILURE; milestone columns show how many times the milestone was reached). <strong>Detail</strong>: one row per outcome or milestone, in order of encounter.</p>
+        </div>
+        <div id="singlePanel">
         <h2>Interaction</h2>
         <label class="field"><span>Interaction (conversation) ID</span>
           <input type="text" id="convId" placeholder="e.g. 3f2a9c1e-…" autocomplete="off" spellcheck="false" /></label>
@@ -264,6 +321,7 @@
           <button class="btn" id="jsonBtn" type="button" disabled>JSON</button>
         </div>
         <p class="note">Downloads contain every event in order of encounter, whatever filter is showing on screen.</p>
+        </div>
       </section>
     </main>
   </div>
@@ -310,6 +368,8 @@ const S = {
   token: null, org: null, domain: null,
   busy: false, runSeq: 0,
   result: null,            // { conversationId, conversationStart, conversationEnd, interval, events[] }
+  mode: 'single',
+  bulk: { ids: [], templateCols: [], fileName: '', sheetName: '', results: new Map(), columns: [], rows: [], running: false, done: 0, notes: [] },
   view: 'group', open: new Set(),   // 'group' = outcomes with expandable milestones, 'flat' = single timeline
   names: new Map(),        // 'milestone:id' | 'outcome:id' -> Promise<{name, description, error}>
 };
@@ -423,7 +483,7 @@ async function api(path, opts = {}, tries = 0, refreshed = false) {
     try { await refreshToken(); } catch (e) { sessionExpired(); throw new Error('Your session has expired. Please sign in again.'); }
     return api(path, opts, tries, true);
   }
-  if (res.status === 429 && tries < 4) {
+  if (res.status === 429 && tries < 6) {
     const wait = (parseFloat(res.headers.get('Retry-After')) || 2) * 1000;
     await sleep(wait);
     return api(path, opts, tries + 1, refreshed);
@@ -480,6 +540,7 @@ async function restoreSession() {
 
 function clearSession() {
   S.token = null; S.org = null; S.runSeq++; S.busy = false; S.result = null; S.names = new Map();
+  S.bulk.results = new Map(); S.bulk.columns = []; S.bulk.rows = []; S.bulk.running = false;
   sessionStorage.removeItem(K.token);
   renderAll();
 }
@@ -499,14 +560,15 @@ function logLine(text, cls) {
   const li = document.createElement('li'); if (cls) li.className = cls; li.innerHTML = text; $('log').appendChild(li); return li;
 }
 
-async function runJob(conversationId, startMs, endMs, seq) {
+// Runs one async details job for one or more conversation IDs; resolves with every conversation returned.
+async function runJobIds(ids, startMs, endMs, seq) {
   const interval = `${new Date(startMs).toISOString()}/${new Date(endMs).toISOString()}`;
   const job = await api('/api/v2/analytics/conversations/details/jobs', {
     method: 'POST',
     body: JSON.stringify({
       interval,
       order: 'asc', orderBy: 'conversationStart',
-      conversationFilters: [{ type: 'and', predicates: [{ type: 'dimension', dimension: 'conversationId', operator: 'matches', value: conversationId }] }],
+      conversationFilters: [{ type: ids.length === 1 ? 'and' : 'or', predicates: ids.map((id) => ({ type: 'dimension', dimension: 'conversationId', operator: 'matches', value: id })) }],
     }),
   });
   const jobId = job && (job.jobId || job.id);
@@ -533,8 +595,15 @@ async function runJob(conversationId, startMs, endMs, seq) {
     (page.conversations || []).forEach((c) => convs.push(c));
     cursor = page.cursor || null;
   } while (cursor);
-  return { interval, conv: convs.find((c) => c.conversationId === conversationId) || null };
+  return { interval, convs };
 }
+async function runJob(conversationId, startMs, endMs, seq) {
+  const r = await runJobIds([conversationId], startMs, endMs, seq);
+  if (!r) return null;
+  return { interval: r.interval, conv: r.convs.find((c) => c.conversationId === conversationId) || null };
+}
+
+
 
 /* ---------- near-real-time lookups (used before the async job) ---------- */
 // The async job reads from the analytics data lake, which lags real time by roughly 12-48 hours.
@@ -640,6 +709,7 @@ function buildEvents(conv) {
 async function fetchMilestoneAggregates(conv, metricMs) {
   const t0 = [msOf(conv.conversationStart), ...metricMs.map((m) => m.ms)].filter((x) => x !== null);
   const t1 = [msOf(conv.conversationEnd) ?? Date.now(), ...metricMs.map((m) => m.ms)].filter((x) => x !== null);
+  if (!t0.length) throw new Error('the interaction has no timestamps to search around');
   const startB = Math.floor(Math.min(...t0) / 60000) * 60000 - 60000;
   const endB = Math.ceil(Math.max(...t1) / 60000) * 60000 + 60000;
   const span = endB - startB;
@@ -784,47 +854,16 @@ async function retrieve() {
       return;
     }
 
-    const built = buildEvents(found);
-    const events = built.events, notes = [];
-    if (!events.some((e) => e.kind === 'Milestone')) {
-      // analytics gave no milestone IDs: rebuild them from milestone metrics + flow aggregates
-      logLine(`${built.metricMs.length} milestone event${built.metricMs.length === 1 ? '' : 's'} in the analytics metrics (timestamps only, no IDs)`);
-      const li2 = logLine('<span class="spinner"></span>Looking up milestone IDs from flow aggregates…');
-      try {
-        const agg = await fetchMilestoneAggregates(found, built.metricMs);
-        if (seq !== S.runSeq) return;
-        const j = joinMilestones(agg.entries, agg.gran, built.metricMs);
-        j.rows.forEach((r) => events.push(r));
-        const withId = j.rows.filter((r) => r.id).length;
-        li2.className = withId ? 'ok' : ''; li2.textContent = withId ? `Matched ${withId} milestone${withId === 1 ? '' : 's'} to IDs` : 'No milestone IDs returned by flow aggregates';
-        if (j.rows.length) notes.push('Genesys analytics does not store milestone IDs in the conversation record. Milestones here are rebuilt by joining the per-minute flow aggregates (which carry the IDs) with the timestamped milestone metrics. ' + (j.approx ? `${j.approx} milestone${j.approx === 1 ? '' : 's'} happened in a minute that contained several different milestones (or no timestamp), so their exact order and time within that minute is not recoverable; these show a minute-level time marked "~".` : 'Every milestone could be placed at its exact time.'));
-        if (!withId && built.metricMs.length) notes.push('Milestone events were recorded, but flow aggregates returned no IDs for them yet (aggregates can lag by a few minutes), so they are listed by time only.');
-      } catch (e) {
-        if (seq !== S.runSeq) return;
-        li2.className = 'bad'; li2.textContent = 'Flow aggregates unavailable: ' + e.message;
-        built.metricMs.forEach((m) => events.push({ kind: 'Milestone', value: '', end: '', durationMs: null, hint: '', ...m, id: '', outcomeId: '', precision: 'exact' }));
-        notes.push(`Milestone IDs could not be retrieved (${e.message}). ${built.metricMs.length} milestone event${built.metricMs.length === 1 ? '' : 's'} are shown with their timestamps only.${e.status === 403 ? ' The user and OAuth client need permission to read flow aggregates (analytics flowAggregate view).' : ''}`);
-      }
-      sortEvents(events);
-    }
-    const nm = events.filter((e) => e.kind === 'Milestone').length, no = events.length - nm;
-    logLine(`${nm} milestone${nm === 1 ? '' : 's'} and ${no} outcome${no === 1 ? '' : 's'} found`);
-    if (events.length) {
-      const li = logLine('<span class="spinner"></span>Resolving Architect names…');
-      await resolveAll(events, seq, (d, t) => { li.innerHTML = `<span class="spinner"></span>Resolving Architect names ${d} of ${t}…`; });
-      if (seq !== S.runSeq) return;
-      const bad = events.filter((e) => !e.resolved);
-      li.className = bad.length ? '' : 'ok';
-      li.textContent = bad.length ? `Names resolved for ${events.length - bad.length} of ${events.length} events` : 'All names resolved';
-      if (bad.length) {
-        const msg = bad.find((e) => e.resolveError);
-        showMsg(`${bad.length} event(s) could not be resolved to an Architect name, so the analytics label or ID is shown instead.${msg ? '\nFirst error: ' + msg.resolveError : ''}\nResolving names needs Architect flow view permission and a matching OAuth scope.`, 'warn');
-      }
-    } else {
-      showMsg('The interaction was found, but it has no flow outcomes or milestones recorded against it.', 'info');
-    }
+    const ui = {
+      alwaysAggregate: true,
+      line: (h) => { const li = logLine(h); return { html: (x) => { li.innerHTML = x; }, text: (x, c) => { li.className = c || ''; li.textContent = x; } }; },
+      warn: (m, k) => showMsg(m, k),
+    };
+    const a = await analyse(found, seq, ui);
+    if (!a) return;
+    if (!a.events.length) showMsg('The interaction was found, but it has no flow outcomes or milestones recorded against it.', 'info');
     if (!found.conversationEnd && $('msg').hidden) showMsg('This interaction has not ended yet, so the outcomes and milestones shown may be incomplete.', 'info');
-    S.result = { source, notes, groups: linkMilestones(events), conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events };
+    S.result = { source, notes: a.notes, groups: a.groups, conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: lastInterval, events: a.events };
   } catch (e) {
     if (seq === S.runSeq) {
       showMsg('Could not retrieve the interaction: ' + e.message + (e.status === 403 ? '\nThe signed-in user and OAuth client need permission to read analytics conversation details.' : ''));
@@ -832,6 +871,48 @@ async function retrieve() {
   } finally {
     if (seq === S.runSeq) { S.busy = false; renderAll(); }
   }
+}
+
+/* ---------- analyse one found conversation: events, milestone IDs, names, grouping ---------- */
+// ui = { alwaysAggregate, line(html) -> { html(h), text(t, cls) }, warn(text, kind) }; resolves null if cancelled.
+async function analyse(found, seq, ui) {
+  const built = buildEvents(found);
+  const events = built.events, notes = [];
+  if (!events.some((e) => e.kind === 'Milestone') && (built.metricMs.length || ui.alwaysAggregate)) {
+    // analytics gave no milestone IDs: rebuild them from milestone metrics + flow aggregates
+    ui.line(`${built.metricMs.length} milestone event${built.metricMs.length === 1 ? '' : 's'} in the analytics metrics (timestamps only, no IDs)`);
+    const li2 = ui.line('<span class="spinner"></span>Looking up milestone IDs from flow aggregates…');
+    try {
+      const agg = await fetchMilestoneAggregates(found, built.metricMs);
+      if (seq !== S.runSeq) return null;
+      const j = joinMilestones(agg.entries, agg.gran, built.metricMs);
+      j.rows.forEach((r) => events.push(r));
+      const withId = j.rows.filter((r) => r.id).length;
+      li2.text(withId ? `Matched ${withId} milestone${withId === 1 ? '' : 's'} to IDs` : 'No milestone IDs returned by flow aggregates', withId ? 'ok' : '');
+      if (j.rows.length) notes.push('Genesys analytics does not store milestone IDs in the conversation record. Milestones here are rebuilt by joining the per-minute flow aggregates (which carry the IDs) with the timestamped milestone metrics. ' + (j.approx ? `${j.approx} milestone${j.approx === 1 ? '' : 's'} happened in a minute that contained several different milestones (or no timestamp), so their exact order and time within that minute is not recoverable; these show a minute-level time marked "~".` : 'Every milestone could be placed at its exact time.'));
+      if (!withId && built.metricMs.length) notes.push('Milestone events were recorded, but flow aggregates returned no IDs for them yet (aggregates can lag by a few minutes), so they are listed by time only.');
+    } catch (e) {
+      if (seq !== S.runSeq) return null;
+      li2.text('Flow aggregates unavailable: ' + e.message, 'bad');
+      built.metricMs.forEach((m) => events.push({ kind: 'Milestone', value: '', end: '', durationMs: null, hint: '', ...m, id: '', outcomeId: '', precision: 'exact' }));
+      notes.push(`Milestone IDs could not be retrieved (${e.message}). ${built.metricMs.length} milestone event${built.metricMs.length === 1 ? '' : 's'} are shown with their timestamps only.${e.status === 403 ? ' The user and OAuth client need permission to read flow aggregates (analytics flowAggregate view).' : ''}`);
+    }
+    sortEvents(events);
+  }
+  const nm = events.filter((e) => e.kind === 'Milestone').length, no = events.length - nm;
+  ui.line(`${nm} milestone${nm === 1 ? '' : 's'} and ${no} outcome${no === 1 ? '' : 's'} found`);
+  if (events.length) {
+    const li = ui.line('<span class="spinner"></span>Resolving Architect names…');
+    await resolveAll(events, seq, (d, t) => li.html(`<span class="spinner"></span>Resolving Architect names ${d} of ${t}…`));
+    if (seq !== S.runSeq) return null;
+    const bad = events.filter((e) => !e.resolved);
+    li.text(bad.length ? `Names resolved for ${events.length - bad.length} of ${events.length} events` : 'All names resolved', bad.length ? '' : 'ok');
+    if (bad.length) {
+      const msg = bad.find((e) => e.resolveError);
+      ui.warn(`${bad.length} event(s) could not be resolved to an Architect name, so the analytics label or ID is shown instead.${msg ? '\nFirst error: ' + msg.resolveError : ''}\nResolving names needs Architect flow view permission and a matching OAuth scope.`, 'warn');
+    }
+  }
+  return { events, notes, groups: linkMilestones(events) };
 }
 
 /* ---------- group milestones under their parent outcome ---------- */
@@ -964,7 +1045,7 @@ function renderResults() {
   $('notes').hidden = !(r.notes && r.notes.length); $('notes').textContent = (r.notes || []).join('\n\n');
   const ev = r.events;
   const nm = ev.filter((e) => e.kind === 'Milestone').length, no = ev.length - nm;
-  document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.v === S.view)));
+  document.querySelectorAll('#sumbar .chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.v === S.view)));
   $('grpBtns').hidden = S.view !== 'group';
   $('counts').textContent = `${no} outcome${no === 1 ? '' : 's'} · ${nm} milestone${nm === 1 ? '' : 's'}`;
   $('meta').innerHTML = `Interaction <strong>${esc(r.conversationId)}</strong>${r.conversationStart ? ` · started ${esc(fmtTime(r.conversationStart).main)}` : ''} · shown in order of encounter${r.source ? ` · source: ${esc(r.source)}` : ''}`;
@@ -989,7 +1070,7 @@ function renderResults() {
   });
   $('rows').innerHTML = html;
 }
-function renderAll() { renderAuth(); renderResults(); }
+function renderAll() { renderAuth(); renderMode(); renderResults(); renderBulk(); }
 
 /* ---------- downloads ---------- */
 function download(filename, text, mime) {
@@ -1030,6 +1111,267 @@ function downloadJson() {
   download(`interaction_${r.conversationId}_outcomes_milestones.json`, JSON.stringify(out, null, 2), 'application/json');
 }
 
+/* ======================= SPREADSHEET (BULK) MODE ======================= */
+const GUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const norm = (s) => String(s ?? '').trim().toLowerCase();
+
+function parseCsvText(text) {
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
+    else if (c === '"') q = true;
+    else if (c === ',' || c === '\t' || c === ';') { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// Reads the first sheet that contains interaction IDs. Returns { ids, templateCols, sheetName }.
+async function readSpreadsheet(file) {
+  const isText = /\.(csv|txt)$/i.test(file.name);
+  let sheets = [];
+  if (window.XLSX) {
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    sheets = wb.SheetNames.map((n) => ({ name: n, rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' }) }));
+  } else if (isText) {
+    sheets = [{ name: file.name, rows: parseCsvText(await file.text()) }];
+  } else {
+    throw new Error('The spreadsheet reader could not be loaded (cdnjs.cloudflare.com may be blocked on this network). Save the sheet as CSV and upload that instead.');
+  }
+  for (const sh of sheets) {
+    const rows = sh.rows; if (!rows.length) continue;
+    // locate the heading row/column ("Interaction ID" / "Conversation ID"), else the column with most GUIDs
+    let hRow = -1, idCol = -1;
+    for (let r = 0; r < Math.min(rows.length, 10) && idCol < 0; r++) {
+      const c = (rows[r] || []).findIndex((v) => /^(interaction|conversation)[\s_-]*(id)?$/i.test(String(v).trim()));
+      if (c >= 0) { hRow = r; idCol = c; }
+    }
+    if (idCol < 0) {
+      const counts = new Map();
+      rows.forEach((row) => (row || []).forEach((v, c) => { if (GUID_ANY.test(String(v))) counts.set(c, (counts.get(c) || 0) + 1); }));
+      if (!counts.size) continue;
+      idCol = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    }
+    const seen = new Set(), ids = [];
+    rows.slice(hRow + 1).forEach((row) => {
+      const m = GUID_ANY.exec(String((row || [])[idCol] ?? '')); if (!m) return;
+      const id = m[0].toLowerCase(); if (!seen.has(id)) { seen.add(id); ids.push(id); }
+    });
+    if (!ids.length) continue;
+    const templateCols = hRow >= 0 ? (rows[hRow] || []).map((v, c) => ({ v: String(v).trim(), c })).filter((x) => x.v && x.c !== idCol).map((x) => x.v) : [];
+    return { ids, templateCols, sheetName: sh.name };
+  }
+  throw new Error('No interaction IDs (GUIDs) were found in that file.');
+}
+
+async function loadFile(file) {
+  clearMsg();
+  if (!file) return;
+  try {
+    const r = await readSpreadsheet(file);
+    const B = S.bulk;
+    B.ids = r.ids; B.templateCols = r.templateCols; B.fileName = file.name; B.sheetName = r.sheetName;
+    B.results = new Map(); B.columns = []; B.rows = []; B.done = 0; B.notes = [];
+    $('blog').innerHTML = ''; $('barText').textContent = ''; $('bar').hidden = true;
+    $('fileInfo').innerHTML = `<strong>${esc(file.name)}</strong> · sheet "${esc(r.sheetName)}": ${r.ids.length} unique interaction ID${r.ids.length === 1 ? '' : 's'}${r.templateCols.length ? `, ${r.templateCols.length} column heading${r.templateCols.length === 1 ? '' : 's'} to fill` : ''}.`;
+  } catch (e) {
+    S.bulk.ids = []; $('fileInfo').textContent = '';
+    showMsg(e.message);
+  }
+  renderAll();
+}
+
+function blogLine(text, cls) { const li = document.createElement('li'); if (cls) li.className = cls; li.innerHTML = text; $('blog').appendChild(li); return li; }
+
+async function pool(items, n, fn) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) { const it = items[next++]; await fn(it); }
+  }));
+}
+
+function bulkProgress() {
+  const B = S.bulk, n = B.ids.length, d = B.results.size;
+  $('bar').hidden = !(B.running || d); $('barFill').style.width = n ? Math.round((d / n) * 100) + '%' : '0%';
+  $('barText').textContent = n && (B.running || d) ? `${d} of ${n} interaction${n === 1 ? '' : 's'} processed` : '';
+}
+
+async function bulkRun() {
+  clearMsg();
+  const B = S.bulk;
+  if (S.busy || !B.ids.length) return;
+  const seq = ++S.runSeq;
+  S.busy = true; B.running = true; B.results = new Map(); B.columns = []; B.rows = []; B.notes = [];
+  $('blog').innerHTML = '';
+  renderAll(); bulkProgress();
+  let fatal = null;
+
+  const quietUi = (warnings) => ({ alwaysAggregate: false, line: () => ({ html() {}, text() {} }), warn: (m) => warnings.push(m.split('\n')[0]) });
+  const finish = async (id, found, source) => {
+    const warnings = [];
+    const a = await analyse(found, seq, quietUi(warnings));
+    if (!a || seq !== S.runSeq) return;
+    B.results.set(id, {
+      id, status: a.events.length ? 'ok' : 'empty', source, notes: a.notes, groups: a.groups, events: a.events, warnings,
+      conversationId: id, conversationStart: found.conversationStart || '', conversationEnd: found.conversationEnd || '', interval: '',
+    });
+    bulkProgress();
+  };
+
+  try {
+    // pass 1: direct lookup by ID (fast, near real time)
+    const l1 = blogLine('<span class="spinner"></span>Looking up each interaction directly…');
+    const missing = [];
+    await pool(B.ids, 3, async (id) => {
+      if (fatal || seq !== S.runSeq) return;
+      try {
+        const found = await fetchById(id);
+        if (seq !== S.runSeq) return;
+        if (found) await finish(id, found, 'Analytics conversation details (by ID)'); else missing.push(id);
+      } catch (e) {
+        if (e.status === 403 || e.status === 401) { fatal = e; return; }
+        B.results.set(id, { id, status: 'error', error: e.message, events: [], groups: [], notes: [], warnings: [] }); bulkProgress();
+      }
+    });
+    if (seq !== S.runSeq) return;
+    if (fatal) throw fatal;
+    l1.className = 'ok'; l1.textContent = `Direct lookup: ${B.results.size} found, ${missing.length} not available`;
+
+    // pass 2: async job for the rest, one job per 31-day window and chunk of IDs
+    let left = [...missing];
+    if (left.length) {
+      const lookbackMs = parseInt($('lookback2').value, 10) * DAY;
+      const now = Date.now(), floor = now - lookbackMs;
+      let end = now;
+      while (left.length && end > floor) {
+        const start = Math.max(end - 31 * DAY, floor);
+        const label = `${new Date(start).toISOString().slice(0, 10)} → ${new Date(end).toISOString().slice(0, 10)}`;
+        const todo = [...left];
+        for (let i = 0; i < todo.length && seq === S.runSeq; i += 50) {
+          const chunk = todo.slice(i, i + 50);
+          const li = blogLine(`<span class="spinner"></span>Async job ${label} for ${chunk.length} interaction${chunk.length === 1 ? '' : 's'}…`);
+          try {
+            const r = await runJobIds(chunk, start, end, seq);
+            if (seq !== S.runSeq) return;
+            const byId = new Map(r.convs.map((c) => [c.conversationId, c]));
+            const hits = chunk.filter((id) => byId.has(id));
+            await pool(hits, 3, (id) => finish(id, byId.get(id), 'Analytics conversation details job (async)'));
+            li.className = hits.length ? 'ok' : ''; li.textContent = `${label}: found ${hits.length} of ${chunk.length}`;
+            left = left.filter((id) => !B.results.has(id));
+          } catch (e) { li.className = 'bad'; li.textContent = `${label}: ${e.message}`; B.notes.push(`Async job for ${label} failed: ${e.message}`); }
+        }
+        end = start;
+      }
+    }
+    if (seq !== S.runSeq) return;
+    left.filter((id) => !B.results.has(id)).forEach((id) => B.results.set(id, { id, status: 'notfound', events: [], groups: [], notes: [], warnings: [] }));
+    const n = [...B.results.values()];
+    const warned = n.filter((r) => r.warnings && r.warnings.length);
+    if (warned.length) B.notes.push(`${warned.length} interaction${warned.length === 1 ? '' : 's'} had events whose Architect name could not be resolved (first message: ${warned[0].warnings[0]}). The analytics label or ID is used for those.`);
+    if (n.some((r) => r.notes && r.notes.length)) B.notes.push('Milestones are rebuilt by joining per-minute flow aggregates with the milestone metrics (Genesys analytics does not store milestone IDs in the conversation record). Where several different milestones occurred in the same minute their order within that minute is not recoverable, but they are still counted correctly.');
+    blogLine(`Done: ${n.filter((r) => r.status === 'ok').length} with results, ${n.filter((r) => r.status === 'empty').length} with no outcomes/milestones, ${n.filter((r) => r.status === 'notfound').length} not found, ${n.filter((r) => r.status === 'error').length} errors`, 'ok');
+  } catch (e) {
+    if (seq === S.runSeq) showMsg('Spreadsheet run stopped: ' + e.message + (e.status === 403 ? '\nThe signed-in user and OAuth client need permission to read analytics conversation details.' : ''));
+  } finally {
+    if (seq === S.runSeq) { S.busy = false; B.running = false; buildSummary(); renderAll(); bulkProgress(); }
+  }
+}
+
+function bulkStop() {
+  const B = S.bulk; S.runSeq++; S.busy = false; B.running = false;
+  B.notes.push('Stopped before all interactions were processed; only those completed so far are shown.');
+  buildSummary(); renderAll(); bulkProgress();
+}
+
+// Summary matrix: one row per interaction, the sheet's own headings first, then anything else that was found.
+function buildSummary() {
+  const B = S.bulk; const cols = []; const byKey = new Map();
+  const addCol = (name, kind, template, key = norm(name)) => { const c = { name, kind, template: !!template, key }; cols.push(c); byKey.set(kind + ':' + key, c); return c; };
+  B.templateCols.forEach((h) => { if (!byKey.has('any:' + norm(h))) addCol(h, 'any', true); });
+  const colFor = (e) => {
+    const nm = e.name || e.id || '(unnamed)', k = norm(nm);
+    return byKey.get('any:' + k) || byKey.get(e.kind + ':' + k) || addCol(e.kind === 'Milestone' ? `${nm} (milestone)` : nm, e.kind, false, k);
+  };
+  const results = B.ids.map((id) => B.results.get(id)).filter(Boolean);
+  results.forEach((r) => r.events.forEach((e) => colFor(e)));
+  // outcomes first, then milestones, among the columns not taken from the sheet
+  const extra = cols.filter((c) => !c.template).sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'Outcome' ? -1 : 1));
+  B.columns = [...cols.filter((c) => c.template), ...extra];
+  B.rows = B.ids.map((id) => {
+    const r = B.results.get(id);
+    const cells = new Map();
+    if (r) r.events.forEach((e) => {
+      const c = colFor(e); const cur = cells.get(c) || { outcomes: [], hits: 0 };
+      if (e.kind === 'Outcome') cur.outcomes.push(e.value || 'UNKNOWN'); else cur.hits++;
+      cells.set(c, cur);
+    });
+    const values = B.columns.map((c) => {
+      const x = cells.get(c); if (!x) return '';
+      const parts = []; if (x.outcomes.length) parts.push(x.outcomes.join(' | ')); if (x.hits) parts.push(String(x.hits));
+      return parts.join(' | ');
+    });
+    const status = !r ? 'Not processed' : r.status === 'ok' ? 'OK' : r.status === 'empty' ? 'Found, no outcomes or milestones recorded' : r.status === 'notfound' ? 'Not found' : 'Error: ' + (r.error || '');
+    return { id, values, status, cls: !r ? 'warn' : r.status === 'ok' ? 'good' : r.status === 'empty' ? 'warn' : 'bad', start: r ? r.conversationStart : '' };
+  });
+}
+
+function renderMode() {
+  const bulk = S.mode === 'bulk';
+  $('singleView').hidden = bulk; $('singlePanel').hidden = bulk;
+  $('bulkView').hidden = !bulk; $('bulkPanel').hidden = !bulk;
+  document.querySelectorAll('#modeBar .chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.m === S.mode)));
+}
+
+function renderBulk() {
+  const B = S.bulk, running = B.running;
+  $('bulkBtn').disabled = !B.ids.length || S.busy; $('bulkBtn').textContent = running ? 'Working…' : 'Retrieve outcomes & milestones';
+  $('bulkStop').hidden = !running; $('xlsFile').disabled = running; $('lookback2').disabled = running;
+  const have = B.rows.length > 0 && !running;
+  $('sumCsv').disabled = $('detCsv').disabled = !have;
+  $('bnotes').hidden = !B.notes.length; $('bnotes').textContent = B.notes.join('\n\n');
+  if (!B.rows.length) {
+    $('bmeta').textContent = B.ids.length ? `${B.ids.length} interaction ID${B.ids.length === 1 ? '' : 's'} loaded from ${B.fileName}. Choose Retrieve.` : 'Choose a spreadsheet of interaction IDs, then choose Retrieve.';
+    $('bempty').textContent = running ? 'Working…' : 'No results yet.'; $('bempty').hidden = false; $('bbody').hidden = true; return;
+  }
+  const rs = [...B.results.values()];
+  $('bmeta').innerHTML = `<strong>${esc(B.fileName)}</strong> · ${B.rows.length} interaction${B.rows.length === 1 ? '' : 's'}: ${rs.filter((r) => r.status === 'ok').length} with results · ${rs.filter((r) => r.status === 'empty').length} empty · ${rs.filter((r) => r.status === 'notfound').length} not found · ${rs.filter((r) => r.status === 'error').length} errors. Select an interaction ID to see its full outcome/milestone breakdown.`;
+  $('bempty').hidden = true; $('bbody').hidden = false;
+  $('bhead').innerHTML = `<tr><th>Interaction ID</th>${B.columns.map((c) => `<th title="${esc(c.kind === 'Milestone' ? 'Milestone' : c.kind === 'Outcome' ? 'Outcome' : c.name)}">${esc(c.name)}</th>`).join('')}<th>Lookup status</th><th>Started</th></tr>`;
+  const tok = (v) => v.split(' | ').map((x) => { const u = x.toUpperCase(); const cls = u === 'SUCCESS' ? 'succ' : u === 'FAILURE' ? 'fail' : /^\d+$/.test(x) ? 'cnt' : ''; return `<span class="vtok ${cls}">${esc(x)}</span>`; }).join('');
+  $('brows').innerHTML = B.rows.map((r) => `<tr>
+    <td class="id"><button type="button" data-open="${esc(r.id)}" ${B.results.get(r.id) && B.results.get(r.id).events.length ? '' : 'disabled style="text-decoration:none;color:inherit;cursor:default"'}>${esc(r.id)}</button></td>
+    ${r.values.map((v) => `<td>${v ? tok(v) : ''}</td>`).join('')}
+    <td class="st ${r.cls}">${esc(r.status)}</td><td class="time">${esc(r.start ? fmtTime(r.start).main : '')}</td></tr>`).join('');
+}
+
+function bulkOpen(id) {
+  const r = S.bulk.results.get(id); if (!r || !r.events.length) return;
+  S.result = { ...r, source: r.source }; S.view = 'group'; S.open = new Set(); S.mode = 'single'; $('convId').value = id;
+  clearMsg(); renderAll();
+}
+
+const stamp = () => { const d = new Date(), p = (x) => String(x).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`; };
+function downloadSummaryCsv() {
+  const B = S.bulk; if (!B.rows.length) return;
+  const head = ['Interaction ID', ...B.columns.map((c) => c.name), 'Lookup status', 'Conversation start (UTC)'];
+  const rows = B.rows.map((r) => [r.id, ...r.values, r.status, r.start]);
+  download(`interactions_outcomes_summary_${stamp()}.csv`, '\ufeff' + [head, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n', 'text/csv;charset=utf-8');
+}
+function downloadDetailCsv() {
+  const B = S.bulk; if (!B.rows.length) return;
+  const head = ['Interaction ID', 'Lookup status', 'Order', 'Timestamp (UTC)', 'Type', 'Name', 'Architect ID', 'Outcome value', 'Outcome end (UTC)', 'Outcome duration (ms)', 'Parent outcome', 'Parent outcome #', 'Flow', 'Flow type', 'Flow version', 'Participant purpose', 'Session ID', 'Time precision'];
+  const rows = [];
+  B.rows.forEach((r) => {
+    const res = B.results.get(r.id);
+    if (!res || !res.events.length) { rows.push([r.id, r.status, ...Array(head.length - 2).fill('')]); return; }
+    res.events.forEach((e) => rows.push([r.id, r.status, e.order, e.ts, e.kind, e.name, e.id, e.value, e.end, e.durationMs ?? '', e.parentName || '', e.parentOrder || '', e.flowName, e.flowType, e.flowVersion, e.participant, e.sessionId, e.precision === 'exact' ? 'exact' : 'minute (order within minute not recoverable)']));
+  });
+  download(`interactions_outcomes_milestones_detail_${stamp()}.csv`, '\ufeff' + [head, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n', 'text/csv;charset=utf-8');
+}
+
 /* ---------- events ---------- */
 function wire() {
   $('authBtn').addEventListener('click', () => (S.token ? signOut() : signIn().catch((e) => { $('authBtn').disabled = false; showMsg(e.message); })));
@@ -1039,6 +1381,17 @@ function wire() {
   $('goBtn').addEventListener('click', retrieve);
   $('convId').addEventListener('keydown', (e) => { if (e.key === 'Enter') retrieve(); });
   $('csvBtn').addEventListener('click', downloadCsv);
+  $('modeBar').addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (!b) return; S.mode = b.dataset.m; clearMsg(); renderAll(); });
+  $('xlsFile').addEventListener('change', (e) => { loadFile(e.target.files[0]); e.target.value = ''; });
+  const drop = $('drop');
+  ['dragenter', 'dragover'].forEach((n) => drop.addEventListener(n, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((n) => drop.addEventListener(n, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => { if (!S.bulk.running) loadFile(e.dataTransfer.files[0]); });
+  $('bulkBtn').addEventListener('click', bulkRun);
+  $('bulkStop').addEventListener('click', bulkStop);
+  $('sumCsv').addEventListener('click', downloadSummaryCsv);
+  $('detCsv').addEventListener('click', downloadDetailCsv);
+  $('brows').addEventListener('click', (e) => { const b = e.target.closest('button[data-open]'); if (b && !b.disabled) bulkOpen(b.dataset.open); });
   $('jsonBtn').addEventListener('click', downloadJson);
   $('sumbar').addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (!b) return; S.view = b.dataset.v; renderResults(); });
   $('rows').addEventListener('click', (e) => {
